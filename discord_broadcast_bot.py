@@ -7,9 +7,8 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# Initialize bot with intents
+# Initialize bot with only the intents needed for slash commands.
 intents = discord.Intents.default()
-intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Config file to store target channels
@@ -47,6 +46,28 @@ def is_authorized(user_id):
     perms = load_permissions()
     return user_id in perms["authorized_users"]
 
+
+def is_moderator_or_admin(interaction: discord.Interaction):
+    """Check whether a member can manage broadcast channels."""
+    if interaction.guild is None:
+        return False
+    permissions = interaction.user.guild_permissions
+    return permissions.administrator or permissions.manage_channels
+
+
+async def require_channel_manager(interaction: discord.Interaction):
+    """Send a permission error and return whether the command may continue."""
+    if is_moderator_or_admin(interaction):
+        return True
+
+    await interaction.response.send_message(
+        "❌ Only moderators with **Manage Channels** or server administrators "
+        "can manage broadcast channels.",
+        ephemeral=True
+    )
+    return False
+
+
 def save_config(config):
     """Save broadcast configuration"""
     with open(CONFIG_FILE, "w") as f:
@@ -55,6 +76,7 @@ def save_config(config):
 @bot.event
 async def on_ready():
     """Bot startup message"""
+    await bot.tree.sync()
     print(f"✅ Bot logged in as {bot.user}")
     print("Commands synced! Use /broadcast to send messages.")
 
@@ -102,9 +124,46 @@ async def broadcast(interaction: discord.Interaction, message: str):
     )
 
 @bot.tree.command(name="add_channel", description="Add a channel to broadcast to")
-@discord.app_commands.describe(channel="The channel to add")
-async def add_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    """Add a channel to the broadcast list"""
+@discord.app_commands.describe(channel_name="Search for and select a text channel")
+async def add_channel(interaction: discord.Interaction, channel_name: str):
+    """Add a text channel by name or by an autocomplete-selected channel ID."""
+    if not await require_channel_manager(interaction):
+        return
+
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ This command must be used inside a server.",
+            ephemeral=True
+        )
+        return
+
+    requested_name = channel_name.strip().lstrip("#")
+    channel = None
+
+    # Autocomplete choices use the channel ID as their hidden value. This
+    # keeps Unicode and punctuation in channel names out of Discord's resolver.
+    if requested_name.isdigit():
+        channel = interaction.guild.get_channel(int(requested_name))
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(int(requested_name))
+            except (discord.NotFound, discord.Forbidden):
+                channel = None
+    else:
+        channel = next(
+            (candidate for candidate in interaction.guild.text_channels
+             if candidate.name == requested_name),
+            None
+        )
+
+    if channel is None:
+        await interaction.response.send_message(
+            f"❌ I couldn't find a text channel named `{channel_name}` in this server. "
+            "Use the exact name, including special characters, or use `/add_channel_id`.",
+            ephemeral=True
+        )
+        return
+
     config = load_config()
     
     # Check if channel already exists
@@ -126,10 +185,80 @@ async def add_channel(interaction: discord.Interaction, channel: discord.TextCha
         f"✅ Added {channel.mention} from **{channel.guild.name}** to broadcast list!"
     )
 
+
+@add_channel.autocomplete("channel_name")
+async def add_channel_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> list[discord.app_commands.Choice[str]]:
+    """Show matching text channels while the user types."""
+    if interaction.guild is None:
+        return []
+
+    query = current.casefold().strip().lstrip("#")
+    matches = [
+        channel for channel in interaction.guild.text_channels
+        if not query or query in channel.name.casefold()
+    ]
+
+    return [
+        discord.app_commands.Choice(name=f"#{channel.name}", value=str(channel.id))
+        for channel in matches[:25]
+    ]
+
+
+@bot.tree.command(name="add_channel_id", description="Add a text channel using its numeric Discord ID")
+@discord.app_commands.describe(channel_id="The numeric ID of the channel")
+async def add_channel_id(interaction: discord.Interaction, channel_id: str):
+    """Add a channel by ID, avoiding channel-name and Unicode resolution issues."""
+    if not await require_channel_manager(interaction):
+        return
+
+    try:
+        channel = await bot.fetch_channel(int(channel_id.strip()))
+    except (ValueError, discord.NotFound, discord.Forbidden):
+        await interaction.response.send_message(
+            "❌ I couldn't access that channel ID. Make sure it is numeric and "
+            "that the bot can view the channel.",
+            ephemeral=True
+        )
+        return
+
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message(
+            "❌ That ID is not a text channel or thread. Please use a channel "
+            "where the bot can send messages.",
+            ephemeral=True
+        )
+        return
+
+    config = load_config()
+    if any(c["channel_id"] == channel.id for c in config["channels"]):
+        await interaction.response.send_message(
+            f"⚠️ {channel.mention} is already in the broadcast list!",
+            ephemeral=True
+        )
+        return
+
+    config["channels"].append({
+        "channel_id": channel.id,
+        "server_name": channel.guild.name,
+        "channel_name": channel.name
+    })
+    save_config(config)
+
+    await interaction.response.send_message(
+        f"✅ Added {channel.mention} from **{channel.guild.name}** to broadcast list!"
+    )
+
+
 @bot.tree.command(name="remove_channel", description="Remove a channel from broadcast list")
 @discord.app_commands.describe(channel="The channel to remove")
 async def remove_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     """Remove a channel from the broadcast list"""
+    if not await require_channel_manager(interaction):
+        return
+
     config = load_config()
     
     initial_count = len(config["channels"])
@@ -149,6 +278,13 @@ async def remove_channel(interaction: discord.Interaction, channel: discord.Text
 @bot.tree.command(name="list_channels", description="Show all configured broadcast channels")
 async def list_channels(interaction: discord.Interaction):
     """List all configured channels"""
+    if not is_authorized(interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Only authorized users can view the broadcast channel list.",
+            ephemeral=True
+        )
+        return
+
     config = load_config()
     
     if not config["channels"]:
@@ -167,6 +303,9 @@ async def list_channels(interaction: discord.Interaction):
 @bot.tree.command(name="clear_all", description="Remove all channels from broadcast list")
 async def clear_all(interaction: discord.Interaction):
     """Clear all configured channels"""
+    if not await require_channel_manager(interaction):
+        return
+
     config = load_config()
     config["channels"] = []
     save_config(config)

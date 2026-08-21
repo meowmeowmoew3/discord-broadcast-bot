@@ -1,0 +1,19 @@
+{
+  "channels": [
+    {
+      "channel_id": 1540297672592859199,
+      "server_name": "Broadcast bot",
+      "channel_name": "general"
+    },
+    {
+      "channel_id": 1503258118396837928,
+      "server_name": "Stinky Sect",
+      "channel_name": "where-winds-meet"
+    },
+    {
+      "channel_id": 1023620154220884098,
+      "server_name": "Silver Light",
+      "channel_name": "art-of-war-3"
+    }
+  ]
+}
