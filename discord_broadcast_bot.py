@@ -19,8 +19,8 @@ PERMISSIONS_FILE = "permissions.json"
 # Add your user IDs here (and your friend's)
 # To get your Discord ID: Right-click your name → Copy User ID
 AUTHORIZED_USERS = [
-    # 123456789,  # Your ID here
-    # 987654321,  # Your friend's ID here
+    509770778854555648,  # Your ID here
+    688764082840666219,  # Your friend's ID here
 ]
 
 def load_config():
